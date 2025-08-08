@@ -67,7 +67,8 @@ export default class notepad extends LightningElement {
         stickyNoteClass: m.Completed__c ? 'sticky-note completed' : 'sticky-note',
         completeIconSrc: m.Completed__c ? this.noteIsCompleteIcon : this.noteCompleteIcon,
         completeButtonClass: m.Completed__c ? 'complete-icon-button completed' : 'complete-icon-button',
-        CreatedDate: this.formatCreatedDate(m.CreatedDate)
+        CreatedDate: this.formatCreatedDate(m.CreatedDate),
+        Public__c: m.Public__c || false
       }));
       this.Notes = mappedNotes;
 
@@ -112,18 +113,23 @@ export default class notepad extends LightningElement {
     const isChecked = event.target.checked;
 
     if (noteId) {
-      // Update existing note
       this.Notes = this.Notes.map(note => {
         if (note.Id === noteId) {
-          return { ...note, Public__c: isChecked };
+          return { 
+            ...note,
+            Public__c: isChecked // update actual field used in Apex and UI
+          };
         }
         return note;
       });
     } else {
-      // Update new note
       this.isPublic = isChecked;
     }
   }
+
+
+
+
 
   saveNote() {
     if (!this.NoteText) return;
@@ -164,10 +170,10 @@ export default class notepad extends LightningElement {
   }
 
   saveUpdatedNote(event) {
-    const id = event.currentTarget.dataset.id;
-    const Note = this.Notes.find(m => m.Id === id);
+  const id = event.currentTarget.dataset.id;
+  const Note = this.Notes.find(m => m.Id === id);
 
-    updateNote({
+  updateNote({
       NoteId: id,
       newText: Note.Note_Text__c,
       isPublic: Note.Public__c
@@ -177,10 +183,19 @@ export default class notepad extends LightningElement {
           ...m,
           isEditing: m.Id === id ? false : m.isEditing
         }));
-        return refreshApex(this.wiredResult);
+        
+        // REMOVE this line:
+        // return refreshApex(this.wiredResult);
+
+        this.dispatchEvent(new ShowToastEvent({
+          title: 'Note Updated',
+          message: 'Note was successfully saved.',
+          variant: 'success'
+        }));
       })
       .catch(error => console.error('Error saving Note:', error));
   }
+
 
   deleteNoteRecord(event) {
     const id = event.currentTarget.dataset.id;

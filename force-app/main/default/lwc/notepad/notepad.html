@@ -45,11 +45,13 @@
             <lightning-input
               type="checkbox"
               label="Public (visible to everyone)"
-              checked={isPublic}
-              data-id={noteId}                  
+              checked={Note.Public__c}
+              data-id={Note.Id}
               onchange={handlePublicChange}
               class="slds-m-bottom_small">
             </lightning-input>
+
+
 
             <!-- Show Save/Delete only if owner -->
             <template if:true={Note.isOwner}>

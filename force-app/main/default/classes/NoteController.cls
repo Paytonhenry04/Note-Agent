@@ -20,7 +20,7 @@ public with sharing class NoteController {
     public static List<Note__c> getNotesForRecord(Id recordId, String objectApiName) {
         String recordName = getRecordName(recordId, objectApiName);
         List<Note__c> Notes = [SELECT Id, OwnerId, CreatedDate, Note_Text__c,
-                                Completed__c,
+                                Completed__c, Public__c,
                                 Owner.Id, Owner.Name, Owner.FirstName, Owner.LastName
                                 FROM Note__c
                                 WHERE TargetObjectType__c = :objectApiName
