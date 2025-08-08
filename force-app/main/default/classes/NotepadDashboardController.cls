@@ -2,25 +2,74 @@ public with sharing class NotepadDashboardController {
 
     @AuraEnabled(cacheable=true)
     public static Map<String, Id> getCompanyIdsByNames(List<String> names) {
-    Map<String, Id> result = new Map<String, Id>();
-    if (names == null || names.isEmpty()) {
+        Map<String, Id> result = new Map<String, Id>();
+        if (names == null || names.isEmpty()) {
+            return result;
+        }
+
+        // Dedup incoming names (case-sensitive; adjust if needed)
+        Set<String> nameSet = new Set<String>(names);
+
+        for (Company__c c : [
+            SELECT Id, Name
+            FROM Company__c
+            WHERE Name IN :nameSet
+        ]) {
+            // Only store the first Id if duplicate names exist
+            if (!result.containsKey(c.Name)) {
+                result.put(c.Name, c.Id);
+            }
+        }
         return result;
     }
 
-    // Dedup incoming names (case-sensitive; adjust if needed)
-    Set<String> nameSet = new Set<String>(names);
-
-    for (Company__c c : [
-        SELECT Id, Name
-        FROM Company__c
-        WHERE Name IN :nameSet
-    ]) {
-        // Only store the first Id if duplicate names exist
-        if (!result.containsKey(c.Name)) {
-            result.put(c.Name, c.Id);
+    // NEW METHOD: Generic record lookup by object type and names
+    @AuraEnabled(cacheable=true)
+    public static Map<String, Id> getRecordIdsByNamesAndType(List<String> names, String objectType) {
+        Map<String, Id> result = new Map<String, Id>();
+        if (names == null || names.isEmpty() || String.isBlank(objectType)) {
+            return result;
         }
+
+        // Dedup incoming names
+        Set<String> nameSet = new Set<String>(names);
+        
+        // Build dynamic SOQL
+        String soql = 'SELECT Id, Name FROM ' + String.escapeSingleQuotes(objectType) + ' WHERE Name IN :nameSet';
+        
+        try {
+            List<SObject> records = Database.query(soql);
+            for (SObject record : records) {
+                String recordName = (String) record.get('Name');
+                Id recordId = (Id) record.get('Id');
+                if (!result.containsKey(recordName)) {
+                    result.put(recordName, recordId);
+                }
+            }
+        } catch (Exception e) {
+            System.debug('Error querying ' + objectType + ': ' + e.getMessage());
+            // Return empty map on error rather than throwing exception
+        }
+        
+        return result;
     }
-    return result;
+
+    // NEW METHOD: Batch lookup for multiple object types
+    @AuraEnabled(cacheable=true)
+    public static Map<String, Map<String, Id>> getBatchRecordIds(Map<String, List<String>> objectTypeToNames) {
+        Map<String, Map<String, Id>> result = new Map<String, Map<String, Id>>();
+        
+        if (objectTypeToNames == null || objectTypeToNames.isEmpty()) {
+            return result;
+        }
+        
+        for (String objectType : objectTypeToNames.keySet()) {
+            List<String> names = objectTypeToNames.get(objectType);
+            Map<String, Id> nameToIdMap = getRecordIdsByNamesAndType(names, objectType);
+            result.put(objectType, nameToIdMap);
+        }
+        
+        return result;
     }
 
     @AuraEnabled(cacheable=true)
@@ -33,7 +82,8 @@ public with sharing class NotepadDashboardController {
         if (showCompleted) {
             return [
                 SELECT Id, Name, Note_Text__c, Completed__c, Due_by__c, Created_Time__c,
-                       CreatedDate, OwnerId, Owner.Name, Owner.FirstName, Owner.LastName, TargetObjectName__c, TargetObjectType__c
+                       CreatedDate, OwnerId, Owner.Name, Owner.FirstName, Owner.LastName, 
+                       TargetObjectName__c, TargetObjectType__c
                 FROM Note__c
                 WHERE CreatedById = :uid
                 ORDER BY Due_by__c NULLS LAST, CreatedDate DESC
@@ -42,7 +92,8 @@ public with sharing class NotepadDashboardController {
         } else {
             return [
                 SELECT Id, Name, Note_Text__c, Completed__c, Due_by__c, Created_Time__c,
-                       CreatedDate, OwnerId, Owner.Name, Owner.FirstName, Owner.LastName, TargetObjectName__c, TargetObjectType__c
+                       CreatedDate, OwnerId, Owner.Name, Owner.FirstName, Owner.LastName, 
+                       TargetObjectName__c, TargetObjectType__c
                 FROM Note__c
                 WHERE CreatedById = :uid
                   AND (Completed__c = FALSE OR Completed__c = NULL)
@@ -51,22 +102,6 @@ public with sharing class NotepadDashboardController {
             ];
         }
     }
-
-
-    // @AuraEnabled
-    // public static Id createNote(String text, Datetime dueBy) {
-    //     if (String.isBlank(text)) {
-    //         throw new AuraHandledException('Note text is required.');
-    //     }
-    //     Note__c n = new Note__c(
-    //         Name = (text.length() > 80 ? text.substring(0, 80) : text),
-    //         Note_Text__c = text,
-    //         Due_by__c = dueBy,
-    //         Created_Time__c = System.now()
-    //     );
-    //     insert n;
-    //     return n.Id;
-    // }
 
     @AuraEnabled
     public static void updateNoteText(Id noteId, String newText) {
@@ -122,5 +157,4 @@ public with sharing class NotepadDashboardController {
                                             WHERE User__c = :uId AND Note__c = :noteId];
         delete reminders;
     }
-
 }

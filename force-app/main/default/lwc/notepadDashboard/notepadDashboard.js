@@ -8,8 +8,8 @@ import getMyNotes from '@salesforce/apex/NotepadDashboardController.getMyNotes';
 import updateNoteText from '@salesforce/apex/NotepadDashboardController.updateNoteText';
 import deleteNoteSrv from '@salesforce/apex/NotepadDashboardController.deleteNote';
 
-// Apex – Company Lookup
-import getCompanyIdsByNames from '@salesforce/apex/NotepadDashboardController.getCompanyIdsByNames';
+// Apex – Multi-Object Lookup
+import getBatchRecordIds from '@salesforce/apex/NotepadDashboardController.getBatchRecordIds';
 
 // Apex – Reminders
 import createNoteReminder from '@salesforce/apex/NoteReminderController.createNoteReminder';
@@ -52,8 +52,8 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
     const { data, error } = result;
     if (data) {
       this.notes = data.map((n) => this._mapNote(n));
-      this._hydrateCompanyLinks();  // Populate Company__c Id links
-      this._hydrateReminders();     // Populate reminder states
+      this._hydrateRecordLinks();     // Updated method name
+      this._hydrateReminders();       // Populate reminder states
       this.loading = false;
     } else if (error) {
       console.error('getMyNotes error', error);
@@ -69,7 +69,8 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
   // --------------------------------------------------------------------------
   _mapNote(n) {
     const completed = n.Completed__c === true;
-    const companyName = n.TargetObjectName__c; // text field storing company name
+    const recordName = n.TargetObjectName__c;    // Generic record name
+    const objectType = n.TargetObjectType__c;    // Object API name
 
     return {
       ...n,
@@ -83,7 +84,8 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
       notificationIconSrc: noteNotfiyMeOffIcon,
       createdDisplay: this._fmtDate(n.CreatedDate),
       dueDisplay: n.Due_by__c ? this._fmtDate(n.Due_by__c) : null,
-      companyName,
+      recordName,          // Generic field name
+      objectType,          // Object API name
       relatedRecordId: null,     // Will be filled by Apex lookup
     };
   }
@@ -106,49 +108,72 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
   }
 
   // --------------------------------------------------------------------------
-  // Hydrate Company Links
+  // Hydrate Record Links - Multi-Object Support
   // --------------------------------------------------------------------------
-  _hydrateCompanyLinks() {
-  // collect unique canonical names (trim + lowercase) but keep original mapping
-  const canonToOriginal = {};
-  const canonNames = [];
+  _hydrateRecordLinks() {
+    // Group notes by object type and collect unique canonical names
+    const objectTypeToNames = {};
+    const canonToOriginalByType = {};
 
-  this.notes.forEach((n) => {
-    const raw = n.companyName;
-    if (!raw) return;
-    const canon = raw.trim().toLowerCase();
-    if (!canon) return;
-    if (!canonToOriginal[canon]) {
-      canonToOriginal[canon] = raw; // store first raw version seen
-      canonNames.push(raw.trim());  // send trimmed original to Apex
-    }
-  });
+    this.notes.forEach((n) => {
+      const rawName = n.recordName;
+      const objectType = n.objectType;
+      
+      if (!rawName || !objectType) return;
+      
+      const canonName = rawName.trim().toLowerCase();
+      if (!canonName) return;
 
-  if (canonNames.length === 0) return;
+      // Initialize object type tracking
+      if (!objectTypeToNames[objectType]) {
+        objectTypeToNames[objectType] = [];
+        canonToOriginalByType[objectType] = {};
+      }
 
-  getCompanyIdsByNames({ names: canonNames })
-    .then((nameIdMap) => {
-      // Reindex Apex results canonically (trim + lowercase)
-      const normMap = {};
-      Object.keys(nameIdMap).forEach((rawName) => {
-        const canon = rawName.trim().toLowerCase();
-        normMap[canon] = nameIdMap[rawName];
-      });
-
-      // Apply to notes
-      this.notes = this.notes.map((n) => {
-        if (!n.companyName) return n;
-        const canon = n.companyName.trim().toLowerCase();
-        const id = normMap[canon];
-        return id
-          ? { ...n, relatedRecordId: id }
-          : n;
-      });
-    })
-    .catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error('getCompanyIdsByNames error', err);
+      // Track canonical to original name mapping
+      if (!canonToOriginalByType[objectType][canonName]) {
+        canonToOriginalByType[objectType][canonName] = rawName.trim();
+        objectTypeToNames[objectType].push(rawName.trim());
+      }
     });
+
+    // If no records to look up, exit early
+    if (Object.keys(objectTypeToNames).length === 0) return;
+
+    // Call Apex to get batch results
+    getBatchRecordIds({ objectTypeToNames })
+      .then((batchResults) => {
+        // batchResults is Map<String, Map<String, Id>>
+        // objectType -> (recordName -> recordId)
+        
+        // Normalize results by object type and canonical name
+        const normalizedResults = {};
+        Object.keys(batchResults).forEach((objectType) => {
+          const nameIdMap = batchResults[objectType];
+          normalizedResults[objectType] = {};
+          
+          Object.keys(nameIdMap).forEach((rawName) => {
+            const canonName = rawName.trim().toLowerCase();
+            normalizedResults[objectType][canonName] = nameIdMap[rawName];
+          });
+        });
+
+        // Apply to notes
+        this.notes = this.notes.map((n) => {
+          if (!n.recordName || !n.objectType) return n;
+          
+          const canonName = n.recordName.trim().toLowerCase();
+          const objectResults = normalizedResults[n.objectType];
+          const recordId = objectResults ? objectResults[canonName] : null;
+          
+          return recordId 
+            ? { ...n, relatedRecordId: recordId }
+            : n;
+        });
+      })
+      .catch((err) => {
+        console.error('getBatchRecordIds error', err);
+      });
   }
 
   // --------------------------------------------------------------------------
@@ -194,14 +219,14 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
     const recordId = event.currentTarget.dataset.recordId;
     if (!recordId) return; // nothing to navigate to
 
-    // Optional: figure out the object to navigate (default Company__c)
-    // Because the dataset only has the Id, we lookup note in memory:
-    const noteId = event.currentTarget.dataset.noteId; // we'll add this in HTML (see below)
-    let apiName = 'Company__c';
+    // Get the object API name from the note
+    const noteId = event.currentTarget.dataset.noteId;
+    let apiName = 'Company__c'; // fallback default
+    
     if (noteId) {
-      const n = this.notes.find((x) => x.Id === noteId);
-      if (n && n.TargetObjectType__c) {
-        apiName = n.TargetObjectType__c; // expect e.g., Company__c
+      const note = this.notes.find((x) => x.Id === noteId);
+      if (note && note.objectType) {
+        apiName = note.objectType; // e.g., Company__c, Product2, Crucible__c, etc.
       }
     }
 
@@ -214,7 +239,6 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
       }
     });
   }
-
 
   // --------------------------------------------------------------------------
   // Getters
@@ -351,9 +375,7 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
   }
 
   getNoteCardStyle(note) {
-  // show pointer only when we have an Id
-  return note.relatedRecordId ? 'cursor:pointer;' : '';
+    // show pointer only when we have an Id
+    return note.relatedRecordId ? 'cursor:pointer;' : '';
   }
-
-
 }
