@@ -40,6 +40,9 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
   notePendingDelete;
   wiredResult;
 
+  // Cache for record IDs to persist across navigation
+  @track recordIdCache = new Map();
+
   editNoteIcon = noteEditIcon;
   deleteNoteIcon = noteDeleteIcon;
 
@@ -65,12 +68,26 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
   }
 
   // --------------------------------------------------------------------------
+  // Lifecycle methods to handle component visibility changes
+  // --------------------------------------------------------------------------
+  connectedCallback() {
+    // Re-hydrate record links when component becomes active
+    if (this.notes && this.notes.length > 0) {
+      this._hydrateRecordLinks();
+    }
+  }
+
+  // --------------------------------------------------------------------------
   // Mapping helpers
   // --------------------------------------------------------------------------
   _mapNote(n) {
     const completed = n.Completed__c === true;
     const recordName = n.TargetObjectName__c;    // Generic record name
     const objectType = n.TargetObjectType__c;    // Object API name
+
+    // Check cache first for existing record ID
+    const cacheKey = this._getCacheKey(recordName, objectType);
+    const cachedRecordId = this.recordIdCache.get(cacheKey);
 
     return {
       ...n,
@@ -86,8 +103,12 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
       dueDisplay: n.Due_by__c ? this._fmtDate(n.Due_by__c) : null,
       recordName,          // Generic field name
       objectType,          // Object API name
-      relatedRecordId: null,     // Will be filled by Apex lookup
+      relatedRecordId: cachedRecordId || null,     // Use cached value if available
     };
+  }
+
+  _getCacheKey(recordName, objectType) {
+    return `${objectType}:${recordName}`;
   }
 
   _fmtDate(iso) {
@@ -108,14 +129,15 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
   }
 
   // --------------------------------------------------------------------------
-  // Hydrate Record Links - Multi-Object Support
+  // Hydrate Record Links - Multi-Object Support with Caching
   // --------------------------------------------------------------------------
   _hydrateRecordLinks() {
     // Group notes by object type and collect unique canonical names
     const objectTypeToNames = {};
     const canonToOriginalByType = {};
+    const notesToUpdate = [];
 
-    this.notes.forEach((n) => {
+    this.notes.forEach((n, index) => {
       const rawName = n.recordName;
       const objectType = n.objectType;
       
@@ -124,7 +146,18 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
       const canonName = rawName.trim().toLowerCase();
       if (!canonName) return;
 
-      // Initialize object type tracking
+      const cacheKey = this._getCacheKey(rawName.trim(), objectType);
+      
+      // If we already have this in cache, use it
+      if (this.recordIdCache.has(cacheKey)) {
+        const cachedId = this.recordIdCache.get(cacheKey);
+        if (n.relatedRecordId !== cachedId) {
+          notesToUpdate.push({ index, recordId: cachedId });
+        }
+        return;
+      }
+
+      // Initialize object type tracking for lookup
       if (!objectTypeToNames[objectType]) {
         objectTypeToNames[objectType] = [];
         canonToOriginalByType[objectType] = {};
@@ -137,10 +170,18 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
       }
     });
 
-    // If no records to look up, exit early
+    // Apply cached updates immediately
+    if (notesToUpdate.length > 0) {
+      this.notes = [...this.notes];
+      notesToUpdate.forEach(({ index, recordId }) => {
+        this.notes[index] = { ...this.notes[index], relatedRecordId: recordId };
+      });
+    }
+
+    // If no new records to look up, exit early
     if (Object.keys(objectTypeToNames).length === 0) return;
 
-    // Call Apex to get batch results
+    // Call Apex to get batch results for new lookups only
     getBatchRecordIds({ objectTypeToNames })
       .then((batchResults) => {
         // batchResults is Map<String, Map<String, Id>>
@@ -154,7 +195,12 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
           
           Object.keys(nameIdMap).forEach((rawName) => {
             const canonName = rawName.trim().toLowerCase();
-            normalizedResults[objectType][canonName] = nameIdMap[rawName];
+            const recordId = nameIdMap[rawName];
+            normalizedResults[objectType][canonName] = recordId;
+            
+            // Cache the result
+            const cacheKey = this._getCacheKey(rawName, objectType);
+            this.recordIdCache.set(cacheKey, recordId);
           });
         });
 
@@ -208,7 +254,7 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
   }
 
   // --------------------------------------------------------------------------
-  // Navigation - click on the sticky note
+  // Navigation - click on the sticky note with improved error handling
   // --------------------------------------------------------------------------
   handleNoteCardClick(event) {
     // Ignore clicks on interactive child controls
@@ -217,10 +263,25 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
 
     // Grab record id from dataset
     const recordId = event.currentTarget.dataset.recordId;
-    if (!recordId) return; // nothing to navigate to
+    const noteId = event.currentTarget.dataset.noteId;
+    
+    console.log('Note card clicked - recordId:', recordId, 'noteId:', noteId);
+    
+    if (!recordId) {
+      console.log('No recordId available for navigation');
+      
+      // Try to re-hydrate record links if recordId is missing
+      if (noteId) {
+        const note = this.notes.find((x) => x.Id === noteId);
+        if (note && note.recordName && note.objectType) {
+          console.log('Attempting to re-hydrate record links...');
+          this._hydrateRecordLinks();
+        }
+      }
+      return;
+    }
 
     // Get the object API name from the note
-    const noteId = event.currentTarget.dataset.noteId;
     let apiName = 'Company__c'; // fallback default
     
     if (noteId) {
@@ -230,14 +291,21 @@ export default class NotepadDashboard extends NavigationMixin(LightningElement) 
       }
     }
 
-    this[NavigationMixin.Navigate]({
-      type: 'standard__recordPage',
-      attributes: {
-        recordId,
-        objectApiName: apiName,
-        actionName: 'view'
-      }
-    });
+    console.log('Navigating to:', { recordId, apiName });
+
+    try {
+      this[NavigationMixin.Navigate]({
+        type: 'standard__recordPage',
+        attributes: {
+          recordId,
+          objectApiName: apiName,
+          actionName: 'view'
+        }
+      });
+    } catch (error) {
+      console.error('Navigation error:', error);
+      this._toast('Navigation Error', 'Unable to navigate to the record.', 'error');
+    }
   }
 
   // --------------------------------------------------------------------------
